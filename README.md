@@ -6,7 +6,11 @@ These demos show Praxis replacing components in a MaaS (Models-as-a-Service) gat
 
 ## Demos
 
-See [demos/](demos/) for the full list and deployment instructions.
+See [demos/](demos/) for deployment instructions, architecture diagrams, and curl examples.
+
+## Scripts
+
+- [`scripts/validate-all.sh`](scripts/validate-all.sh) — full integration test suite covering Praxis BBR replacement, Praxis provider gateway, and existing MaaS gpt-4o routes
 
 ## License
 
