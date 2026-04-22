@@ -1,0 +1,316 @@
+# BBR Replacement Demo — Praxis replaces ext-proc for model routing
+#
+# Deploys:
+#   - Two mock model backends (nginx-unprivileged)
+#   - Praxis proxy with model_to_header + router
+#   - HTTPRoute attached to maas-default-gateway
+#   - AuthPolicy + TokenRateLimitPolicy overrides
+#
+# Praxis does body-based model extraction natively,
+# eliminating the ext_proc/BBR hop entirely.
+
+---
+# --- Mock model backends ---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-qwen-conf
+  namespace: llm
+data:
+  default.conf: |
+    server {
+        listen 8080;
+        location / {
+            return 200 '{"id":"chatcmpl-demo","object":"chat.completion","model":"qwen","choices":[{"message":{"role":"assistant","content":"hello from qwen backend (routed by Praxis)"}}]}';
+            default_type application/json;
+        }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: echo-mistral-conf
+  namespace: llm
+data:
+  default.conf: |
+    server {
+        listen 8080;
+        location / {
+            return 200 '{"id":"chatcmpl-demo","object":"chat.completion","model":"mistral","choices":[{"message":{"role":"assistant","content":"hello from mistral backend (routed by Praxis)"}}]}';
+            default_type application/json;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-qwen
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-qwen
+  template:
+    metadata:
+      labels:
+        app: echo-qwen
+    spec:
+      containers:
+        - name: echo
+          image: nginxinc/nginx-unprivileged:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+      volumes:
+        - name: conf
+          configMap:
+            name: echo-qwen-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-qwen
+  namespace: llm
+spec:
+  selector:
+    app: echo-qwen
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-mistral
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-mistral
+  template:
+    metadata:
+      labels:
+        app: echo-mistral
+    spec:
+      containers:
+        - name: echo
+          image: nginxinc/nginx-unprivileged:alpine
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+      volumes:
+        - name: conf
+          configMap:
+            name: echo-mistral-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-mistral
+  namespace: llm
+spec:
+  selector:
+    app: echo-mistral
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+# --- Praxis proxy ---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: praxis-config
+  namespace: llm
+data:
+  config.yaml: |
+    admin:
+      address: "0.0.0.0:9901"
+      verbose: true
+    insecure_options:
+      allow_public_admin: true
+    listeners:
+      - name: default
+        address: "0.0.0.0:8080"
+        filter_chains:
+          - observability
+          - classify
+          - route
+    filter_chains:
+      - name: observability
+        filters:
+          - filter: request_id
+          - filter: access_log
+      - name: classify
+        filters:
+          - filter: model_to_header
+            header: X-AI-Model
+      - name: route
+        filters:
+          - filter: router
+            routes:
+              - path_prefix: "/praxis/v1/chat/completions/"
+                headers:
+                  x-ai-model: "qwen"
+                cluster: qwen
+              - path_prefix: "/praxis/v1/chat/completions/"
+                headers:
+                  x-ai-model: "mistral"
+                cluster: mistral
+              - path_prefix: "/v1/chat/completions/"
+                headers:
+                  x-ai-model: "qwen"
+                cluster: qwen
+              - path_prefix: "/v1/chat/completions/"
+                headers:
+                  x-ai-model: "mistral"
+                cluster: mistral
+              - path_prefix: "/"
+                cluster: default
+          - filter: load_balancer
+            clusters:
+              - name: qwen
+                endpoints:
+                  - "QWEN_CLUSTER_IP:8080"
+              - name: mistral
+                endpoints:
+                  - "MISTRAL_CLUSTER_IP:8080"
+              - name: default
+                endpoints:
+                  - "QWEN_CLUSTER_IP:8080"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: praxis
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: praxis
+  template:
+    metadata:
+      labels:
+        app: praxis
+    spec:
+      containers:
+        - name: praxis
+          image: ghcr.io/nerdalert/praxis:maas-dev
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: config
+              mountPath: /etc/praxis/config.yaml
+              subPath: config.yaml
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /healthy
+              port: admin
+      volumes:
+        - name: config
+          configMap:
+            name: praxis-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: praxis
+  namespace: llm
+spec:
+  selector:
+    app: praxis
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: admin
+      port: 9901
+      targetPort: 9901
+
+---
+# --- Gateway route + policy ---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: praxis-bbr-demo
+  namespace: llm
+spec:
+  parentRefs:
+    - name: maas-default-gateway
+      namespace: openshift-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /praxis
+      backendRefs:
+        - name: praxis
+          port: 8080
+---
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: praxis-auth
+  namespace: llm
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: praxis-bbr-demo
+  rules:
+    authentication:
+      kubernetes-tokens:
+        kubernetesTokenReview:
+          audiences:
+            - maas-default-gateway-sa
+        metrics: false
+        priority: 0
+    authorization:
+      allow-authenticated:
+        metrics: false
+        opa:
+          allValues: false
+          rego: |
+            allow {
+              input.auth.identity.user.username != ""
+            }
+        priority: 0
+---
+apiVersion: kuadrant.io/v1alpha1
+kind: TokenRateLimitPolicy
+metadata:
+  name: praxis-allow
+  namespace: llm
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: praxis-bbr-demo
+  limits:
+    allow-praxis:
+      counters:
+        - expression: auth.identity.userid
+      rates:
+        - limit: 100
+          window: 1m
