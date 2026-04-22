@@ -59,13 +59,12 @@ body-aware routing without external processing.
 
 ### [model-routing-gateway](model-routing-gateway/)
 
-**Status: Blocked on `request_set`**
+**Status: Working** (requires [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers) branch)
 
 Praxis as the direct model-routing proxy to a real
-external provider (OpenAI). DNS resolution and upstream
-TLS work. Blocked because Praxis can only add request
-headers, not replace them — the provider rejects duplicate
-Host headers.
+external provider (OpenAI). Praxis resolves DNS for
+the upstream, establishes TLS, and uses `request_set`
+to rewrite Host and inject provider credentials.
 
 ## Deployment
 

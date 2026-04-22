@@ -29,6 +29,7 @@ data:
         address: "0.0.0.0:8080"
         filter_chains:
           - observability
+          - normalize
           - classify
           - inject-credentials
           - route
@@ -37,6 +38,13 @@ data:
         filters:
           - filter: request_id
           - filter: access_log
+      - name: normalize
+        filters:
+          - filter: path_rewrite
+            strip_prefix: "/praxis-gw"
+            conditions:
+              - when:
+                  path_prefix: "/praxis-gw/"
       - name: classify
         filters:
           - filter: model_to_header
@@ -44,7 +52,7 @@ data:
       - name: inject-credentials
         filters:
           - filter: headers
-            request_add:
+            request_set:
               - name: "Authorization"
                 value: "Bearer OPENAI_API_KEY_PLACEHOLDER"
               - name: "Host"

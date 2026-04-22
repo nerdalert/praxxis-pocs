@@ -34,33 +34,22 @@ inline without ext-proc.
 | Envoy upstream routing | Praxis `router` + `load_balancer` |
 | ExternalName Service | Praxis upstream TLS cluster |
 
-## Current status
+## Features used
 
-**Blocked on `request_set`/`request_remove`.** Praxis can
-only ADD request headers, not replace them. When proxying
-to an external provider:
+This demo uses two features added on the `nerdalert/praxis`
+fork ([`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers)):
 
-- The client's `Host` header (from the gateway) is
-  forwarded alongside the added `Host: api.openai.com`,
-  creating a duplicate that the provider rejects
-- The client's `Authorization` header needs to be REPLACED
-  with the provider key, not appended to
-
-This demo deploys and connects (DNS resolution, TLS
-handshake, and SNI all work), but the request fails at
-the provider because of the duplicate Host header.
-
-**Unblocked once Praxis adds:**
-- `request_set` — overwrite an existing request header
-- `request_remove` — strip a request header before upstream
+- **DNS resolution** — upstream endpoints accept hostnames
+  (e.g. `api.openai.com:443`)
+- **`request_set`** — overwrites Host and Authorization
+  headers for provider egress
 
 ## What is NOT replaced yet
 
 | Component | Why |
 |---|---|
-| Host header rewrite | Needs `request_set` (only `request_add` exists) |
 | api-translation | Provider schema translation not implemented |
-| apikey-injection (from Secret) | Uses static `request_add`; needs `request_set` for production |
+| apikey-injection (from Secret) | Uses static config; production needs Secret-backed injection |
 
 ## Prerequisites
 
