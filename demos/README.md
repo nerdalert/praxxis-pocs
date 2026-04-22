@@ -135,7 +135,7 @@ access method=POST path=/praxis/v1/chat/completions/ status=200 cluster="mistral
 ### Demo 2: Model Routing Gateway — external provider
 
 Route to a real OpenAI endpoint through Praxis
-(requires `feat/dns-and-request-headers` branch features):
+(requires [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers) branch features):
 
 ```bash
 $ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
@@ -143,11 +143,16 @@ $ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}'
 
-# Expected when working:
-{"id":"chatcmpl-...","object":"chat.completion","model":"gpt-4o",...}
-
-# Current status: POST with body hits StreamBuffer/chunked-transfer
-# issue with Cloudflare. GET requests proxy successfully.
+{
+  "id": "chatcmpl-DXJwnCft3MKgNR35EFhmWfuAljan2",
+  "object": "chat.completion",
+  "model": "gpt-4o-2024-08-06",
+  "choices": [{
+    "message": {"role": "assistant", "content": "Understood."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 14, "completion_tokens": 3, "total_tokens": 17}
+}
 ```
 
 ## Prerequisites

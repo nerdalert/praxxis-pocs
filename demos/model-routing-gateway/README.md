@@ -20,19 +20,21 @@ Client → Gateway → Praxis
 → OpenAI response
 ```
 
-Praxis handles body-based model extraction, provider
-routing, upstream TLS, and API key injection — all
+Praxis handles path normalization, provider credential
+injection, upstream TLS, and Host header rewriting — all
 inline without ext-proc.
 
 ## What is replaced
 
 | Current Component | Praxis Replacement |
 |---|---|
-| BBR body-field-to-header | `model_to_header` filter |
 | ext_proc gRPC sidecar | eliminated |
 | EnvoyFilter for ext_proc | eliminated |
 | Envoy upstream routing | Praxis `router` + `load_balancer` |
-| ExternalName Service | Praxis upstream TLS cluster |
+| ExternalName Service | Praxis upstream TLS with DNS resolution |
+| apikey-injection plugin | `request_set` filter (static config) |
+| Host header rewrite | `request_set` filter |
+| Path normalization | `path_rewrite` filter |
 
 ## Features used
 

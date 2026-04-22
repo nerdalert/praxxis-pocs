@@ -30,7 +30,6 @@ data:
         filter_chains:
           - observability
           - normalize
-          - classify
           - inject-credentials
           - route
     filter_chains:
@@ -45,10 +44,6 @@ data:
             conditions:
               - when:
                   path_prefix: "/praxis-gw/"
-      - name: classify
-        filters:
-          - filter: model_to_header
-            header: X-AI-Model
       - name: inject-credentials
         filters:
           - filter: headers
