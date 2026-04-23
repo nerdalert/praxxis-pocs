@@ -6,15 +6,23 @@ These demos show Praxis replacing components in a MaaS (Models-as-a-Service) gat
 
 ## Praxis Changes
 
-These demos require features on the [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers) branch of `nerdalert/praxis`:
+These demos require features on two branches:
+
+**[`nerdalert/praxis` `feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers)**
 
 | Feature | What it does |
 |---------|-------------|
 | **DNS resolution** | Upstream endpoints accept DNS hostnames (e.g. `api.openai.com:443`) instead of requiring IP:port |
 | **`request_set` / `request_remove`** | Header filter can overwrite or remove request headers before upstream — needed for Host rewrite and provider credential injection |
-| **StreamBuffer body forwarding fix** | All body chunks are buffered for replay regardless of filter Release state — fixes body forwarding to upstream backends after body inspection |
+| **StreamBuffer body forwarding** | All body chunks are buffered for replay regardless of filter Release state |
 
-Image: `ghcr.io/nerdalert/praxis:maas-dev` (public, includes all three features)
+**[`nerdalert/pingora` `feat/streambuffer-initial-send`](https://github.com/nerdalert/pingora/tree/feat/streambuffer-initial-send)**
+
+| Feature | What it does |
+|---------|-------------|
+| **Initial body send for pre-read bodies** | Ensures `request_body_filter` is called when downstream body was consumed during pre-read, enabling body replay to upstream |
+
+Image: `ghcr.io/nerdalert/praxis:maas-dev` (public, includes all features)
 
 ## Demos
 
