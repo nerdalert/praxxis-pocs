@@ -1,14 +1,28 @@
 # MaaS + Praxis Integration
 
-Praxis replaces the ext-proc/BBR/wasm-shim pipeline in
-MaaS by doing body-aware routing, credential injection,
-and provider egress inline — no gRPC sidecar, no Wasm,
-no external processor.
+Praxis replaces the ext-proc/BBR body-processing pipeline
+in MaaS — the payload-processing pod and its four plugins
+(body-field-to-header, model-provider-resolver,
+api-translation, apikey-injection) — by doing body-aware
+routing, credential injection, and provider egress inline.
+No gRPC sidecar, no ext-proc EnvoyFilter, no separate
+payload-processing pod. Envoy remains the gateway proxy —
+Praxis runs behind it as a backend, not a replacement.
+
+The Kuadrant gateway wasm plugin (auth + rate limiting)
+is a separate component and is NOT replaced. It continues
+to call Authorino for API key validation and Limitador
+for per-subscription token rate limits, exactly as before.
 
 This demo validates Praxis as a drop-in replacement for
 the body-processing data path in a production MaaS stack,
 while preserving the full MaaS auth, subscription, and
-rate-limiting flow.
+rate-limiting enforcement provided by Kuadrant, Authorino,
+and Limitador.
+
+## Phase Status
+
+- **[Phase 1 — ext-proc/BBR Replacement](phase-1-completion.md): COMPLETE**
 
 ## Current Status
 
@@ -67,9 +81,19 @@ No changes to the `models-as-a-service` repository.
 
 ## What Praxis Replaces
 
+Praxis replaces the **BBR/ext-proc body-processing pipeline**,
+not the Kuadrant auth/rate-limit wasm plugin. These are two
+separate components in the MaaS gateway:
+
+- **Kuadrant wasm plugin** — auth + rate limiting. Calls
+  Authorino and Limitador. **Still running.**
+- **ext-proc/BBR pipeline** — body inspection, model
+  extraction, provider resolution, credential injection.
+  **Replaced by Praxis.**
+
 | MaaS Component | What it does | Praxis replacement | Status |
 |---|---|---|---|
-| ext-proc gRPC sidecar | Separate pod for body inspection via gRPC | Eliminated — Praxis inspects body inline via StreamBuffer | **Done** |
+| ext-proc gRPC sidecar (payload-processing pod) | Separate pod for body inspection via gRPC — runs body-field-to-header, model-provider-resolver, api-translation, apikey-injection plugins | Eliminated — Praxis inspects body inline via StreamBuffer | **Done** |
 | EnvoyFilter for ext-proc | Istio CRD wiring ext-proc into gateway Envoy | Eliminated — not needed | **Done** |
 | body-field-to-header plugin | Reads request body over gRPC, extracts `model` field, returns header mutation | `model_to_header` filter — reads body in-process, promotes field to header | **Done** |
 | model-provider-resolver plugin | Watches MaaS CRDs at runtime, resolves model name → provider endpoint + transport config | `router` filter with static YAML config — model→cluster mapping defined at deploy time | **Done** (static only) |
@@ -81,8 +105,9 @@ No changes to the `models-as-a-service` repository.
 
 | MaaS Component | What it does | Status |
 |---|---|---|
-| Authorino | API key validation, K8s token auth, subscription checks, OPA authorization | **Unchanged** — runs at gateway level before traffic reaches Praxis |
-| Limitador | Per-subscription token rate limiting | **Unchanged** — enforced by gateway wasm plugin |
+| Kuadrant wasm plugin | Gateway-level Envoy plugin that calls Authorino (auth) and Limitador (rate limits) | **Unchanged** — this is NOT the wasm-shim that Praxis replaces. This is the Kuadrant auth/rate-limit enforcement layer that runs in the gateway Envoy before traffic reaches any backend. |
+| Authorino | API key validation, K8s token auth, subscription checks, OPA authorization | **Unchanged** — called by the Kuadrant wasm plugin before traffic reaches Praxis |
+| Limitador | Per-subscription token rate limiting | **Unchanged** — called by the Kuadrant wasm plugin before traffic reaches Praxis |
 | maas-api | REST API for key minting, subscription management, model catalog | **Unchanged** |
 | MaaS controller | Reconciles ExternalModel → HTTPRoute + Service + AuthPolicy + TRLP | **Unchanged** — creates the routes that Praxis backend-patches |
 | KServe | LLMInferenceService lifecycle, in-cluster model deployment, HTTPRoute creation | **Unchanged** — handles the facebook/opt-125m simulator route directly |
@@ -371,3 +396,38 @@ Results: 8 passed, 0 failed, 0 skipped
 | Istio sidecar injection | Echo backends and Praxis pods hang in `Init:1/2` if `llm` namespace has `istio-injection=enabled`. | Deploy scripts remove the label automatically. |
 | sed key corruption | `sed` corrupts API keys containing certain character sequences during ConfigMap injection. | Deploy script uses bash parameter expansion `${CONFIG//placeholder/$value}` instead. |
 | StreamBuffer + external TLS combined | Body inspection (`model_to_header`) and external provider routing work in separate paths. Combining them in a single hop requires both the Praxis and Pingora fixes. | Both fixes are included in the current image. |
+
+## MaaS Consolidation Roadmap
+
+| Phase | Target | What moves into Praxis | What it eliminates | GitHub Issues | Status |
+|-------|--------|----------------------|-------------------|---------------|--------|
+| **1** | ext-proc/BBR replacement | Body extraction, model routing, credential injection, provider TLS egress | ext-proc pod, EnvoyFilter, DestinationRule, ExternalName Service, payload-processing RBAC | — | **Complete** ([details](phase-1-completion.md)) |
+| **2** | Descriptor-based rate limiting | Request quotas keyed by tenant, model, workspace headers | Limitador for request-count limits | #21 (partial), new descriptor-limit issue | Not started |
+| **2** | Prometheus metrics | `/metrics` endpoint on admin listener | — (additive) | #8 | Not started |
+| **2** | Per-filter failure modes | Configurable fail-open/fail-closed per filter | — (additive) | #48 | Not started |
+| **2b** | Inline auth (JWT / API key) | JWT signature verification, API key validation, JWKS caching | Authorino gRPC callout, Authorino TLS workaround | #12, #14 | Not started |
+| **3** | Eliminate Kuadrant wasm plugin | Auth + rate limiting both handled by Praxis | Kuadrant wasm plugin, WasmPlugin CRD, Authorino operator, Limitador deployment | Depends on Phase 2 + 2b | Not started |
+| **3b** | Token counting + token-aware limits | Prompt/completion token counting, per-descriptor token quotas, shared state backend | Limitador for token-quota enforcement | #20, #21 | Not started |
+| **4** | Praxis as the gateway | TLS termination, HTTP/2, HTTP/3, WebSocket, Gateway API | Envoy gateway, Istio gateway pods, all EnvoyFilter/WasmPlugin CRDs | #7, #33, #39 | Not started |
+
+### Phase dependencies
+
+```
+Phase 1 (COMPLETE)
+  │
+  ├── Phase 2: descriptor rate limiting (#21, new issue)
+  │     requires: #8 (Prometheus metrics)
+  │
+  ├── Phase 2b: inline auth (#12, #14)
+  │
+  └── Phase 2 + 2b together enable:
+        │
+        Phase 3: eliminate Kuadrant wasm plugin
+          │
+          ├── Phase 3b: token counting + token limits (#20, #21)
+          │     requires: shared state backend (new issue)
+          │
+          └── Phase 3 + 3b together enable:
+                │
+                Phase 4: Praxis as the gateway (#7, #33, #39)
+```
