@@ -1,43 +1,159 @@
 # Praxis Demos
 
-Demonstrations of Praxis replacing components in the MaaS
-(Models-as-a-Service) gateway stack.
+Praxis replaces the ext-proc/BBR/wasm-shim pipeline in
+MaaS by doing body-aware routing inline. These demos
+prove the replacement end-to-end on a live MaaS cluster.
 
-## What Praxis replaces
+## Current Status
 
-Praxis is an AI-native proxy that performs body-aware
-routing inline, eliminating the need for external
-processing sidecars.
+| Demo | What it proves | Result |
+|------|---------------|--------|
+| [bbr-replacement](bbr-replacement/) | Body-based model routing with body forwarding to backends | **6/6 passing** |
+| [model-routing-gateway](model-routing-gateway/) | Real OpenAI completions through Praxis via upstream TLS | **2/2 passing** |
+| MaaS gpt-4o (existing stack) | Auth/subscription flow still works alongside Praxis | **4/5 passing** (404 expected — ext-proc not deployed) |
 
-### Current MaaS routing stack
+Full validation: `scripts/validate-all.sh` — **12 passed, 1 expected failure**.
 
-```
-Client → Envoy → Wasm (kuadrant auth)
-→ ext_proc (gRPC) → payload-processing
-  ├── body-field-to-header (model extraction)
-  ├── model-provider-resolver
-  ├── api-translation
-  └── apikey-injection
-→ Envoy routes by X-Gateway-Model-Name → backend
-```
+## Request Flow — What Praxis Replaces
 
-### With Praxis
+### Before (current MaaS stack)
 
 ```
-Client → Gateway → Praxis
-  ├── model_to_header  (native, inline)
-  ├── router           (header-based route match)
-  └── load_balancer    (endpoint selection + TLS)
-→ backend
+1. Client sends POST /llm/gpt-4o/v1/chat/completions
+   Body: {"model":"gpt-4o","messages":[...]}
+   Header: Authorization: Bearer <maas-api-key>
+
+2. DNS → AWS ELB → Envoy gateway pod (Istio)
+
+3. Envoy runs Kuadrant Wasm plugin
+   → Authorino ext-auth gRPC call
+   → validates MaaS API key
+   → checks subscription + rate limits via Limitador
+
+4. Envoy runs ext_proc filter (gRPC call to payload-processing pod)
+   → body-field-to-header plugin reads body, extracts "model" → X-Gateway-Model-Name: gpt-4o
+   → model-provider-resolver plugin resolves gpt-4o → api.openai.com
+   → api-translation plugin normalizes request format
+   → apikey-injection plugin injects provider API key from K8s Secret
+
+5. Envoy routes by X-Gateway-Model-Name header
+   → selects ExternalName Service → api.openai.com:443
+
+6. Envoy connects upstream TLS, forwards request
+
+7. OpenAI responds → Envoy forwards to client
 ```
 
-No ext-proc hop. No gRPC sidecar. No Wasm shim.
+**Components in the body path:** ext_proc gRPC sidecar,
+payload-processing pod (4 plugins), EnvoyFilter CRD,
+DestinationRule, ServiceAccount + RBAC.
 
-## What Praxis replaces
+### After (Praxis replaces steps 4-6)
+
+#### Demo 1 — BBR Replacement (body routing to internal backends)
+
+```
+1. Client sends POST /praxis/v1/chat/completions/
+   Body: {"model":"qwen","messages":[{"role":"user","content":"hello"}]}
+   Header: Authorization: Bearer <k8s-token>
+
+2. DNS → AWS ELB → Envoy gateway pod (Istio)
+
+3. Envoy runs Kuadrant Wasm plugin
+   → Authorino validates K8s token (audience: maas-default-gateway-sa)
+   → TokenRateLimitPolicy allows 100 req/min
+
+4. HTTPRoute matches PathPrefix /praxis → forwards to Praxis Service :8080
+
+5. Praxis receives request on listener :8080
+   Filter chain: observability → classify → route
+
+6. observability chain:
+   → request_id: generates X-Request-ID header
+   → access_log: logs method, path, client IP, timing
+
+7. classify chain:
+   → model_to_header: activates StreamBuffer mode
+     a. Reads request body from downstream (may be one or multiple chunks)
+     b. Parses JSON, extracts top-level "model" field → "qwen"
+     c. Promotes value to request header: X-AI-Model: qwen
+     d. Returns Release — body is buffered for upstream replay
+     e. All chunks (including post-Release) are stored in pre_read_body deque
+
+8. route chain:
+   → router: matches path_prefix "/praxis/v1/chat/completions/"
+     + header x-ai-model: "qwen" → selects cluster "qwen"
+   → load_balancer: selects endpoint 172.30.x.x:8080 from cluster "qwen"
+
+9. Pingora connects to upstream (echo-qwen pod)
+   → initial body send: request_body_filter is called
+   → pre_read_body deque is popped → full original body sent to upstream
+   → upstream receives: {"model":"qwen","messages":[{"role":"user","content":"hello"}]}
+
+10. echo-qwen pod reads body, returns JSON with forwarded_model + forwarded_prompt
+    → proves body arrived intact
+
+11. Praxis forwards response to gateway → client receives:
+    {"model":"qwen","forwarded_model":"qwen","forwarded_prompt":"hello",...}
+```
+
+**Components in the body path:** Praxis pod only. No
+ext_proc, no gRPC sidecar, no Wasm, no separate plugins.
+
+#### Demo 2 — Provider Gateway (external model via TLS)
+
+```
+1. Client sends POST /praxis-gw/v1/chat/completions
+   Body: {"model":"gpt-4o","messages":[...],"max_tokens":5}
+   Header: Authorization: Bearer <k8s-token>
+
+2. DNS → ELB → Envoy → Authorino (same as Demo 1 steps 2-3)
+
+3. HTTPRoute matches PathPrefix /praxis-gw → forwards to Praxis Service :8080
+
+4. Praxis receives request on listener :8080
+   Filter chain: observability → normalize → inject-credentials → route
+
+5. observability chain:
+   → request_id + access_log (same as Demo 1)
+
+6. normalize chain:
+   → path_rewrite: condition matches path_prefix "/praxis-gw/"
+     strips prefix → path becomes /v1/chat/completions
+
+7. inject-credentials chain:
+   → headers filter with request_set:
+     a. Overwrites Authorization header: Bearer <openai-api-key>
+        (replaces the K8s token with the provider key)
+     b. Overwrites Host header: api.openai.com
+        (replaces the gateway hostname for Cloudflare routing)
+
+8. route chain:
+   → router: matches path_prefix "/" → selects cluster "openai"
+   → load_balancer: resolves DNS api.openai.com → 172.66.x.x:443
+     establishes upstream TLS with SNI: api.openai.com
+
+9. Pingora sends request to api.openai.com over TLS
+   Path: /v1/chat/completions (rewritten)
+   Host: api.openai.com (overwritten)
+   Authorization: Bearer sk-proj-... (overwritten)
+   Body: original JSON forwarded intact
+
+10. OpenAI processes request, returns completion
+
+11. Praxis forwards response to gateway → client receives:
+    {"model":"gpt-4o-2024-08-06","choices":[{"message":{"content":"Ok."}}],...}
+```
+
+**Components in the body path:** Praxis pod only. DNS
+resolution, TLS, credential injection, and path rewriting
+all happen inline in the proxy.
+
+## What Praxis Replaces
 
 | MaaS Component | What it does | Praxis replacement | Status |
 |---|---|---|---|
-| ext-proc gRPC sidecar | Separate process for body inspection | Eliminated — Praxis does it inline | **Done** |
+| ext-proc gRPC sidecar | Separate process for body inspection | Eliminated — inline in Praxis | **Done** |
 | EnvoyFilter for ext-proc | Wires ext-proc into Envoy | Eliminated — not needed | **Done** |
 | body-field-to-header plugin | Extracts `model` from JSON body → header | `model_to_header` filter | **Done** (Demo 1) |
 | model-provider-resolver plugin | Maps model name → provider endpoint | `router` filter (static config) | **Done** (Demo 2) |
@@ -45,46 +161,35 @@ No ext-proc hop. No gRPC sidecar. No Wasm shim.
 | ExternalName Service | DNS-based routing to api.openai.com | Praxis upstream TLS with DNS resolution | **Done** (Demo 2) |
 | Envoy upstream routing | Routes to backend by header | `router` + `load_balancer` | **Done** |
 
-## What still needs work
+## What Still Needs Work
 
-| Issue | Detail | Fix needed |
-|---|---|---|
-| StreamBuffer + external TLS, single-hop path | The underlying StreamBuffer body-forwarding bug is now fixed and Demo 1 validates forwarding to body-reading backends. What remains unvalidated is collapsing body inspection and external TLS egress into one combined demo path again. | Re-test the single-hop `model_to_header` + external provider route and collapse the demos if it passes. |
-| api-translation plugin | Praxis can't translate between provider API schemas (e.g. OpenAI → Anthropic format) | New feature — not started |
-| Secret-backed credentials | API key is currently hardcoded in the ConfigMap, not sourced from a K8s Secret | New feature — needs Secret mount + injection |
-| MaaS gpt-4o route (404) | Not a Praxis bug — ext-proc isn't deployed because Praxis replaces it. The existing MaaS model route has no body processor. | Deploy ext-proc alongside if you want both paths, or migrate the gpt-4o route to Praxis |
+| Issue | Detail |
+|---|---|
+| api-translation plugin | Praxis can't translate between provider API schemas (e.g. OpenAI → Anthropic format) |
+| Secret-backed credentials | API key is hardcoded in the ConfigMap; production needs K8s Secret mount + injection |
+| Combined body-inspect + external TLS | Demo 1 does body inspection, Demo 2 does external TLS; combining in one hop is not yet validated |
 
-**TLDR:** Praxis replaces 6 of 7 ext-proc/BBR components. The two demos work end-to-end — body-based model routing with verified body forwarding (Demo 1) and real OpenAI provider egress (Demo 2). The remaining open question is whether those can now be collapsed back into a single demo path after the StreamBuffer forwarding fix.
+## Praxis Features Used
 
-## Demos
+These demos run on the [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers)
+branch of `nerdalert/praxis`:
 
-### [bbr-replacement](bbr-replacement/)
+| Feature | What it does |
+|---------|-------------|
+| **DNS resolution** | Upstream endpoints accept hostnames (`api.openai.com:443`) instead of requiring IP:port |
+| **`request_set` / `request_remove`** | Header filter overwrites or removes request headers before upstream |
+| **StreamBuffer body forwarding** | All body chunks buffered for replay regardless of filter Release state |
 
-**Status: Working**
-
-Praxis replaces the BBR/ext-proc pipeline for model
-extraction and routing to mock backends. Proves native
-body-aware routing without external processing.
-
-### [model-routing-gateway](model-routing-gateway/)
-
-**Status: Working** (requires [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers) branch)
-
-Praxis as the direct model-routing proxy to a real
-external provider (OpenAI). Praxis resolves DNS for
-the upstream, establishes TLS, and uses `request_set`
-to rewrite Host and inject provider credentials.
+Image: `ghcr.io/nerdalert/praxis:maas-dev` (public)
 
 ## Deployment
 
 Each demo has its own `deploy.sh` and `validate.sh`:
 
 ```bash
-# BBR replacement (works now)
 ./demos/bbr-replacement/deploy.sh
 ./demos/bbr-replacement/validate.sh
 
-# Model routing gateway (needs request_set)
 export OPENAI_API_KEY='sk-...'
 ./demos/model-routing-gateway/deploy.sh
 ./demos/model-routing-gateway/validate.sh
@@ -94,15 +199,13 @@ export OPENAI_API_KEY='sk-...'
 
 ### Demo 1: BBR Replacement — model-based routing
 
-Get a token and the gateway hostname:
-
 ```bash
 GW_HOST=$(oc -n openshift-ingress get gateway maas-default-gateway \
   -o jsonpath='{.spec.listeners[0].hostname}')
 TOKEN=$(oc create token default -n llm --audience=maas-default-gateway-sa)
 ```
 
-Route to qwen backend by model field in request body:
+Route to qwen backend — body is forwarded and echoed:
 
 ```bash
 $ curl -sk "https://${GW_HOST}/praxis/v1/chat/completions/" \
@@ -110,10 +213,10 @@ $ curl -sk "https://${GW_HOST}/praxis/v1/chat/completions/" \
     -H "Content-Type: application/json" \
     -d '{"model":"qwen","messages":[{"role":"user","content":"hello"}]}'
 
-{"id":"chatcmpl-demo","object":"chat.completion","model":"qwen","choices":[{"message":{"role":"assistant","content":"hello from qwen backend (routed by Praxis)"}}]}
+{"id":"chatcmpl-demo","model":"qwen","forwarded_model":"qwen","forwarded_prompt":"hello",...}
 ```
 
-Route to mistral backend by changing the model field:
+Route to mistral backend:
 
 ```bash
 $ curl -sk "https://${GW_HOST}/praxis/v1/chat/completions/" \
@@ -121,10 +224,10 @@ $ curl -sk "https://${GW_HOST}/praxis/v1/chat/completions/" \
     -H "Content-Type: application/json" \
     -d '{"model":"mistral","messages":[{"role":"user","content":"hello"}]}'
 
-{"id":"chatcmpl-demo","object":"chat.completion","model":"mistral","choices":[{"message":{"role":"assistant","content":"hello from mistral backend (routed by Praxis)"}}]}
+{"id":"chatcmpl-demo","model":"mistral","forwarded_model":"mistral","forwarded_prompt":"hello",...}
 ```
 
-Unauthenticated requests are rejected by the gateway:
+Auth rejection:
 
 ```bash
 $ curl -sk -w "HTTP %{http_code}" "https://${GW_HOST}/praxis/v1/chat/completions/" \
@@ -134,17 +237,7 @@ $ curl -sk -w "HTTP %{http_code}" "https://${GW_HOST}/praxis/v1/chat/completions
 HTTP 401
 ```
 
-Praxis access logs show the routing decision:
-
-```
-access method=POST path=/praxis/v1/chat/completions/ status=200 cluster="qwen"  request_body_bytes=63
-access method=POST path=/praxis/v1/chat/completions/ status=200 cluster="mistral" request_body_bytes=66
-```
-
-### Demo 2: Model Routing Gateway — external provider
-
-Route to a real OpenAI endpoint through Praxis
-(requires [`feat/dns-and-request-headers`](https://github.com/nerdalert/praxis/tree/feat/dns-and-request-headers) branch features):
+### Demo 2: Provider Gateway — real OpenAI
 
 ```bash
 $ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
@@ -152,16 +245,13 @@ $ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}'
 
-{
-  "id": "chatcmpl-DXJwnCft3MKgNR35EFhmWfuAljan2",
-  "object": "chat.completion",
-  "model": "gpt-4o-2024-08-06",
-  "choices": [{
-    "message": {"role": "assistant", "content": "Understood."},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 14, "completion_tokens": 3, "total_tokens": 17}
-}
+{"model":"gpt-4o-2024-08-06","choices":[{"message":{"content":"Ok."}}],"usage":{"total_tokens":13}}
+```
+
+### Full suite
+
+```bash
+./scripts/validate-all.sh
 ```
 
 ## Prerequisites
@@ -169,3 +259,4 @@ $ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
 - MaaS deployed with `maas-default-gateway`
 - `oc` authenticated as cluster admin
 - `ghcr.io/nerdalert/praxis:maas-dev` image (public)
+- OpenAI API key for Demo 2

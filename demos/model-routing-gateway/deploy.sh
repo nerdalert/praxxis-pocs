@@ -19,11 +19,11 @@ oc create namespace llm 2>/dev/null || true
 echo "Deploying manifests..."
 oc apply -f "${SCRIPT_DIR}/manifests.yaml"
 
-# Patch ConfigMap with real API key
+# Patch ConfigMap with real API key using bash string replacement.
 echo "Injecting provider credentials..."
-oc -n llm get configmap praxis-gateway-config -o jsonpath='{.data.config\.yaml}' \
-  | sed "s|OPENAI_API_KEY_PLACEHOLDER|${OPENAI_API_KEY}|g" \
-  > /tmp/praxis-gateway-config-resolved.yaml
+CONFIG=$(oc -n llm get configmap praxis-gateway-config -o jsonpath='{.data.config\.yaml}')
+CONFIG="${CONFIG//OPENAI_API_KEY_PLACEHOLDER/$OPENAI_API_KEY}"
+printf '%s' "$CONFIG" > /tmp/praxis-gateway-config-resolved.yaml
 
 oc -n llm create configmap praxis-gateway-config \
   --from-file=config.yaml=/tmp/praxis-gateway-config-resolved.yaml \
