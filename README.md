@@ -24,26 +24,29 @@ These demos require features on two branches:
 
 Image: `ghcr.io/nerdalert/praxis:maas-dev` (public, includes all features)
 
-## Demos
+## Demo
 
-See [demos/](demos/) for deployment instructions, architecture diagrams, and curl examples.
+See [demos/maas-praxis/](demos/maas-praxis/) for the consolidated MaaS + Praxis integration demo.
+
+## Docs
+
+- [docs/install.md](docs/install.md) — MaaS + Praxis install runbook
+- [docs/streambuffer.md](docs/streambuffer.md) — StreamBuffer body forwarding technical detail
 
 ## Scripts
 
-- [`scripts/validate-all.sh`](scripts/validate-all.sh) — full integration test suite covering Praxis BBR replacement, Praxis provider gateway, and existing MaaS gpt-4o routes
+- [`scripts/validate-all.sh`](scripts/validate-all.sh) — full integration test suite
+- [`scripts/validate-maas-path-gpt.sh`](scripts/validate-maas-path-gpt.sh) — gpt-4o MaaS path validation
+- [`scripts/validate-maas-all-models.sh`](scripts/validate-maas-all-models.sh) — all models (gpt-4o + facebook/opt-125m)
 
-## Validation
+## Quick Start
 
 ```bash
-# Deploy demos (see maas-paxxis-install.md for full runbook)
-./demos/bbr-replacement/deploy.sh
-OPENAI_API_KEY='sk-...' ./demos/model-routing-gateway/deploy.sh
+# Prerequisites: MaaS deployed (see docs/install.md)
 
-# Validate everything
-./scripts/validate-all.sh
+OPENAI_API_KEY='sk-...' ./demos/maas-praxis/deploy.sh
+./demos/maas-praxis/validate.sh
 ```
-
-Expected: 12+ passed, 1 failed (MaaS gpt-4o 404 — ext-proc not deployed because Praxis replaces it).
 
 ## License
 

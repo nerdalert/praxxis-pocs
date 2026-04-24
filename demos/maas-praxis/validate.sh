@@ -1,13 +1,13 @@
 #!/bin/bash
-# Praxis + MaaS full integration validation
+# MaaS + Praxis Integration — validate all paths
 #
 # Tests:
-#   - Praxis BBR replacement route (body-based model routing)
-#   - Praxis provider gateway route (external model egress)
-#   - MaaS gpt-4o route (existing auth + subscription flow)
+#   - BBR replacement: body-based model routing with body forwarding
+#   - Provider gateway: external model via Praxis
+#   - MaaS model path: gpt-4o with MaaS API key through Praxis
 #
 # Usage:
-#   ./scripts/validate-all.sh
+#   ./demos/maas-praxis/validate.sh
 
 set -euo pipefail
 
@@ -24,7 +24,7 @@ check() {
   local name="$1" expect_code="$2" expect_body="${3:-}"
   shift 3
   local response code body
-  response=$(curl -sk -w "\n%{http_code}" "$@" 2>&1)
+  response=$(curl -sk -w "\n%{http_code}" --max-time 15 "$@" 2>&1)
   code=$(echo "$response" | tail -1)
   body=$(echo "$response" | head -n -1)
 
@@ -46,7 +46,7 @@ check_json() {
   local name="$1" expect_code="$2" jq_expr="$3"
   shift 3
   local response code body
-  response=$(curl -sk -w "\n%{http_code}" "$@" 2>&1)
+  response=$(curl -sk -w "\n%{http_code}" --max-time 15 "$@" 2>&1)
   code=$(echo "$response" | tail -1)
   body=$(echo "$response" | head -n -1)
 
@@ -58,7 +58,6 @@ check_json() {
 
   if ! echo "$body" | jq -e "$jq_expr" >/dev/null 2>&1; then
     echo "FAIL  ${name}: HTTP ${code} but JSON check failed: ${jq_expr}"
-    echo "       body: $body"
     FAIL=$((FAIL + 1))
     return
   fi
@@ -67,162 +66,122 @@ check_json() {
   PASS=$((PASS + 1))
 }
 
-# --------------------------------------------------------------------------
-# Demo 1: BBR Replacement — body-based model routing
-# --------------------------------------------------------------------------
+# =========================================================================
+# BBR Replacement — body-based model routing
+# =========================================================================
 
 PRAXIS_TOKEN=$(oc create token default -n llm \
   --audience=maas-default-gateway-sa 2>/dev/null || true)
 
 if [ -z "$PRAXIS_TOKEN" ]; then
-  echo "SKIP  Praxis route tests (could not create audience-scoped token)"
+  echo "SKIP  BBR tests (could not create token)"
   SKIP=$((SKIP + 1))
 else
   echo "===================================================================="
-  echo "DEMO 1: BBR REPLACEMENT — body-based model routing"
+  echo "BBR REPLACEMENT — body-based model routing"
   echo "===================================================================="
   echo ""
 
-  check_json "model=qwen routes to qwen backend and forwards body" 200 \
+  check_json "model=qwen routes and forwards body" 200 \
     '.model == "qwen" and .forwarded_model == "qwen" and .forwarded_prompt == "hello"' \
     "https://${GW_HOST}/praxis/v1/chat/completions/" \
     -H "Authorization: Bearer ${PRAXIS_TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{"model":"qwen","messages":[{"role":"user","content":"hello"}]}'
 
-  check_json "model=mistral routes to mistral backend and forwards body" 200 \
+  check_json "model=mistral routes and forwards body" 200 \
     '.model == "mistral" and .forwarded_model == "mistral" and .forwarded_prompt == "hello"' \
     "https://${GW_HOST}/praxis/v1/chat/completions/" \
     -H "Authorization: Bearer ${PRAXIS_TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{"model":"mistral","messages":[{"role":"user","content":"hello"}]}'
 
-  check_json "no model field falls through to default and still forwards body" 200 \
-    '.model == "qwen" and .forwarded_model == null and .forwarded_prompt == "hello"' \
-    "https://${GW_HOST}/praxis/v1/chat/completions/" \
-    -H "Authorization: Bearer ${PRAXIS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d '{"messages":[{"role":"user","content":"hello"}]}'
-
-  check "no auth returns 401" 401 "" \
+  check "no auth rejected" 401 "" \
     "https://${GW_HOST}/praxis/v1/chat/completions/" \
     -H "Content-Type: application/json" \
     -d '{"model":"qwen","messages":[{"role":"user","content":"hello"}]}'
-
-  check "bogus token returns 401" 401 "" \
-    "https://${GW_HOST}/praxis/v1/chat/completions/" \
-    -H "Authorization: Bearer randomgarbage" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"qwen","messages":[{"role":"user","content":"hello"}]}'
-
-  # Health check
-  HEALTH=$(oc -n llm exec deployment/praxis -- \
-    wget -qO- --timeout=3 http://127.0.0.1:9901/ready 2>/dev/null || echo "UNREACHABLE")
-  if echo "$HEALTH" | grep -q '"status":"ok"'; then
-    echo "PASS  admin /ready returns ok"
-    PASS=$((PASS + 1))
-  else
-    echo "FAIL  admin /ready: ${HEALTH}"
-    FAIL=$((FAIL + 1))
-  fi
 
   echo ""
 fi
 
-# --------------------------------------------------------------------------
-# Demo 2: Model Routing Gateway — external provider
-# --------------------------------------------------------------------------
+# =========================================================================
+# Provider Gateway — external model via Praxis
+# =========================================================================
 
 if oc -n llm get deployment praxis-gateway &>/dev/null; then
   echo "===================================================================="
-  echo "DEMO 2: MODEL ROUTING GATEWAY — external provider"
+  echo "PROVIDER GATEWAY — gpt-4o via Praxis → OpenAI"
   echo "===================================================================="
   echo ""
 
   PRAXIS_TOKEN=${PRAXIS_TOKEN:-$(oc create token default -n llm \
     --audience=maas-default-gateway-sa 2>/dev/null || true)}
 
-  check "chat completion via Praxis → OpenAI" 200 "chat.completion" \
+  check "chat completion via /praxis-gw/" 200 "chat.completion" \
     "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
     -H "Authorization: Bearer ${PRAXIS_TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}'
 
-  check "provider route no auth returns 401" 401 "" \
+  check "provider route no auth rejected" 401 "" \
     "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
 
   echo ""
 else
-  echo "SKIP  Demo 2 (praxis-gateway deployment not found)"
+  echo "SKIP  Provider gateway (praxis-gateway not deployed)"
   SKIP=$((SKIP + 1))
 fi
 
-# --------------------------------------------------------------------------
-# MaaS gpt-4o route (existing stack)
-# --------------------------------------------------------------------------
+# =========================================================================
+# MaaS Model Path — gpt-4o with MaaS API key
+# =========================================================================
 
 echo "===================================================================="
-echo "MAAS GPT-4O ROUTE — existing auth + subscription flow"
+echo "MAAS MODEL PATH — gpt-4o with MaaS API key through Praxis"
 echo "===================================================================="
 echo ""
 
 TOKEN=$(oc whoami -t)
-
 KEY=$(curl -sk -X POST "https://${GW_HOST}/maas-api/v1/api-keys" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name":"validate-all","subscription":"gpt-4o-subscription"}' | jq -r '.key // empty')
+  -d '{"name":"validate","subscription":"gpt-4o-subscription"}' | jq -r '.key // empty')
 
 if [ -z "$KEY" ]; then
-  echo "SKIP  MaaS gpt-4o tests (could not mint API key)"
+  echo "SKIP  MaaS path (could not mint API key)"
   SKIP=$((SKIP + 1))
 else
-  echo "MaaS key: ${KEY:0:20}..."
-  echo ""
+  echo "MaaS API key: ${KEY:0:20}..."
 
-  # This test expects 404 when ext-proc is not deployed (Praxis replaces it).
-  # If ext-proc IS deployed alongside Praxis, it should return 200.
-  MAAS_RESPONSE=$(curl -sk -w "\n%{http_code}" \
+  RAW=$(curl -sk -w "\n%{http_code}" --max-time 15 \
     "https://${GW_HOST}/llm/gpt-4o/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $KEY" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}' 2>&1)
-  MAAS_CODE=$(echo "$MAAS_RESPONSE" | tail -1)
-  if [ "$MAAS_CODE" = "200" ]; then
-    echo "PASS  valid key, correct path (ext-proc deployed): HTTP 200"
+  CODE=$(echo "$RAW" | tail -1)
+  BODY=$(echo "$RAW" | head -n -1)
+
+  if [ "$CODE" = "200" ]; then
+    echo "$BODY" | jq .
+    echo ""
+    echo "PASS  gpt-4o via MaaS API key: HTTP ${CODE}"
     PASS=$((PASS + 1))
-  elif [ "$MAAS_CODE" = "404" ]; then
-    echo "SKIP  valid key, correct path: HTTP 404 (expected — ext-proc not deployed, Praxis replaces it)"
-    SKIP=$((SKIP + 1))
   else
-    echo "FAIL  valid key, correct path: expected 200 or 404, got ${MAAS_CODE}"
+    echo "FAIL  gpt-4o via MaaS API key: expected 200, got ${CODE}"
     FAIL=$((FAIL + 1))
   fi
 
-  check "bogus sk-oai- key" 403 "" \
+  check "bogus key rejected" 403 "" \
     "https://${GW_HOST}/llm/gpt-4o/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer sk-oai-FAKE-KEY-12345" \
+    -H "Authorization: Bearer sk-oai-FAKE" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 
-  check "random token" 401 "" \
+  check "no auth rejected" 401 "" \
     "https://${GW_HOST}/llm/gpt-4o/v1/chat/completions" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer randomgarbage" \
-    -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
-
-  check "no auth" 401 "" \
-    "https://${GW_HOST}/llm/gpt-4o/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
-
-  check "header injection attempt" 401 "" \
-    "https://${GW_HOST}/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer FAKE" \
-    -H "X-Gateway-Model-Name: gpt-4o" \
     -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 fi
 
