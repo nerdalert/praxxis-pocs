@@ -122,8 +122,11 @@ all Praxis and Pingora fixes listed above.
 
 ## Next Phase
 
-Phase 2 targets Limitador replacement with descriptor-based
-rate limiting in Praxis, and Authorino replacement with
-inline JWT/API-key validation. See
+Phase 2 targets descriptor request limiting in Praxis and
+targeted Authorino replacement. MaaS `sk-oai-*` API keys are
+opaque hash-backed keys, so the MaaS path needs a `maas-api`
+validation bridge or equivalent before Authorino can be removed
+from that route. Token-quota parity remains a later Phase 3b
+track. See
 [praxxis-planning.md](../../../praxxis-planning.md) for the
 full roadmap.

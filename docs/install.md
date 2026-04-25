@@ -11,14 +11,15 @@ This runbook reproduces the full working POC on a fresh cluster:
   StreamBuffer replay fix
 - Praxis provider gateway route (`/praxis-gw/*`) — real
   OpenAI completions through Praxis
-- `scripts/validate-all.sh` passing (`12 passed, 1 failed`,
-  where the `404` is the expected MaaS/ext-proc gap)
+- MaaS model path (`/llm/gpt-4o/*`) — MaaS API key auth,
+  subscription policy, then Praxis egress to OpenAI
+- `scripts/validate-all.sh` passing (`13 passed, 0 failed`)
 
 ## Prerequisites
 
 - Fresh OpenShift cluster with `oc` access as `kube:admin`
 - `~/praxxis/models-as-a-service` cloned
-- `~/praxxis/praxxis-pocs` cloned
+- `~/praxxis/praxis-pocs` cloned
   ([github.com/nerdalert/praxis-pocs](https://github.com/nerdalert/praxis-pocs))
 - `OPENAI_API_KEY` for the provider gateway demo
 - Image `ghcr.io/nerdalert/praxis:maas-dev` is public on GHCR
@@ -33,7 +34,7 @@ This runbook reproduces the full working POC on a fresh cluster:
 | Gateway programmed | ~1-2 min after deploy |
 | ODH operator ready | ~2 min after gateway |
 | maas-api + controller ready | ~2 min after ODH operator |
-| Praxis demos deployed | ~2 min each |
+| Praxis consolidated demo deployed | ~2 min |
 | Total | ~12-15 min |
 
 ## 1. Deploy MaaS (ODH)
@@ -204,23 +205,15 @@ spec:
 YAML
 ```
 
-## 6. Deploy Praxis demos
+## 6. Deploy Praxis demo
 
 **Note:** ext-proc/BBR is NOT deployed. Praxis replaces it,
 including the body replay behavior needed for StreamBuffer
 inspection.
 
-### Demo 1: BBR replacement (body-based model routing)
-
-```bash
-~/praxxis/praxxis-pocs/demos/bbr-replacement/deploy.sh
-```
-
-### Demo 2: Provider gateway (real OpenAI)
-
 ```bash
 export OPENAI_API_KEY='<replace-me>'
-~/praxxis/praxxis-pocs/demos/model-routing-gateway/deploy.sh
+~/praxxis/praxis-pocs/demos/maas-praxis/deploy.sh
 ```
 
 ## 7. Validate
@@ -228,7 +221,7 @@ export OPENAI_API_KEY='<replace-me>'
 Wait ~15 seconds for AuthPolicy enforcement, then:
 
 ```bash
-~/praxxis/praxxis-pocs/scripts/validate-all.sh
+~/praxxis/praxis-pocs/scripts/validate-all.sh
 ```
 
 ### Expected results
@@ -237,6 +230,7 @@ Wait ~15 seconds for AuthPolicy enforcement, then:
 DEMO 1: BBR REPLACEMENT
   PASS  model=qwen routes to qwen backend: HTTP 200
   PASS  model=mistral routes to mistral backend: HTTP 200
+  PASS  no model field falls through to default and still forwards body: HTTP 200
   PASS  no auth returns 401: HTTP 401
   PASS  bogus token returns 401: HTTP 401
   PASS  admin /ready returns ok
@@ -246,17 +240,18 @@ DEMO 2: MODEL ROUTING GATEWAY
   PASS  provider route no auth returns 401: HTTP 401
 
 MAAS GPT-4O ROUTE
-  FAIL  valid key, correct path: expected 200, got 404  ← expected
+  PASS  valid key, correct path: HTTP 200
   PASS  bogus sk-oai- key: HTTP 403
   PASS  random token: HTTP 401
   PASS  no auth: HTTP 401
   PASS  header injection attempt: HTTP 401
 
-Results: 11 passed, 1 failed, 0 skipped
+Results: 13 passed, 0 failed, 0 skipped
 ```
 
-The MaaS gpt-4o 404 is expected — ext-proc is not
-deployed because Praxis replaces it.
+The MaaS gpt-4o route is expected to pass. The consolidated
+demo patches the `gpt-4o` HTTPRoute backendRef to
+`praxis-gateway:8080`.
 
 ## 8. Quick manual validation
 
@@ -294,4 +289,4 @@ curl -sk "https://${GW_HOST}/praxis-gw/v1/chat/completions" \
 | Transient 404 after Authorino restart | Gateway wasm plugin has stale gRPC connection to Authorino after restart, causing intermittent 500/404 | Requests self-heal within 30-60s as connection pool recycles; or restart gateway pod |
 | Streaming usage accounting | `/praxis-gw` SSE passthrough works, but the gateway wasm layer logs `Missing json property: /usage/total_tokens` on streamed chunks; even with `stream_options.include_usage=true`, usage only appears on the final chunk | Treat streaming transport as working; treat token accounting/showback for streams as not yet production-ready |
 | Provider gateway 401 | OpenAI rejects the supplied API key upstream | Use a valid `OPENAI_API_KEY` before validating Demo 2 |
-| MaaS gpt-4o 404 | ext-proc not deployed | Expected — Praxis replaces it |
+| MaaS gpt-4o 404 | HTTPRoute backendRef was not patched to `praxis-gateway:8080` or MaaS reconciled it back | Re-run `demos/maas-praxis/deploy.sh` |
