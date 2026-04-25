@@ -10,9 +10,12 @@ MaaS identity projection. Token quotas require Phase 3
 
 ## Status
 
-**Tasks 1-7 complete. Task 8 deferred.**
+**Tasks 1-7 are complete as implementation/demo tasks. Task 8 is deferred.**
 
-All validation scripts passing on production MaaS cluster:
+Cluster validation has been completed for Phase 1, descriptor
+request limiting, and bridge-mode MaaS descriptor projection.
+Task 7 is code-complete and unit-tested, but has **not** yet been
+deployed as the Authorino replacement on a MaaS route.
 
 | Validation | Tests | Result |
 |-----------|-------|--------|
@@ -20,7 +23,12 @@ All validation scripts passing on production MaaS cluster:
 | Phase 2: Descriptor rate limiting | 7 | **7/7** |
 | Phase 2: Bridge-mode MaaS projection | 3 | **3/3** |
 | All models: gpt-4o + facebook/opt-125m | 7 | **7/7** |
-| **Total** | **25** | **25/25** |
+| Cluster script assertions | 25 | **25/25** |
+| Task 7: `http_ext_auth` unit tests | 18 | **18/18** |
+
+The cluster validation rows are separate script checkpoints and
+some paths overlap. They should not be interpreted as 25 unique
+end-to-end scenarios.
 
 ## Artifacts
 
@@ -50,6 +58,31 @@ All commits on `feat/maas-phase2` branch, ordered by dependency:
 | `45550c1` | Task 7 | [#14](https://github.com/praxis-proxy/praxis/issues/14) (partial), [#12](https://github.com/praxis-proxy/praxis/issues/12) (partial) | **HTTP ext-auth filter for MaaS API key validation.** New `http_ext_auth` filter validates bearer tokens via HTTP callout to auth service (e.g. `maas-api`). Extracts `Bearer` token from `Authorization` header. Calls configured endpoint with `{"key":"<token>"}`. Strictly requires `valid:true` in response (fail-closed on missing field, `valid:false`, or malformed response). Maps response JSON fields to `filter_metadata` and upstream headers. Strips configured request headers before upstream — including on callout failure (prevents credential leak on fail-open). TLS verify enabled by default (`tls_skip_verify` for dev). Metrics: `praxis_auth_allowed_total`, `praxis_auth_rejected_total`, `praxis_auth_error_total`. Mock HTTP server tests for `valid:true`, `valid:false`, missing valid, 401/403, metadata injection, header injection, stripping, callout failure. | `http_ext_auth/mod.rs` (new), `http_ext_auth/config.rs` (new), `http_ext_auth/tests.rs` (new), `security/mod.rs`, `builtins/http/mod.rs`, `registry.rs`, `Cargo.toml`, `filter/Cargo.toml` | 18 |
 | `e6cf3f4` | — | — | **Rustls crypto provider init.** Install `aws_lc_rs` crypto provider in `main()` before Pingora and reqwest init to prevent CryptoProvider conflict at startup. Required because reqwest's `rustls-tls-manual-roots` and Pingora both use rustls but neither installs the provider. | `server/src/main.rs`, `server/Cargo.toml` | 0 |
 
+## Phase 2 Summary
+
+Phase 1 proved that Praxis can sit behind the MaaS-created
+HTTPRoute and replace the body-based-routing data path for the
+`gpt-4o` ExternalModel. Authorino and Limitador remained in front
+of Praxis.
+
+Phase 2 adds the request-admission pieces needed to start replacing
+parts of that front-door control path:
+
+| Area | What changed | Replacement value |
+|------|--------------|-------------------|
+| Per-request metadata | Filters can write/read `filter_metadata` across request, body, response, and logging phases. | Later filters can consume identity, subscription, model, and rate-limit decisions without relying only on headers. |
+| Metrics | Praxis exposes `/metrics` and records request, rate-limit, and auth decision metrics. | Gives the POC enough observability to compare Praxis decisions with Kuadrant/Limitador behavior. |
+| Failure modes | Each filter can be `failure_mode: closed` or `failure_mode: open`; rejects are never bypassed. | Lets auth/rate-limit filters fail closed while less critical filters can fail open. |
+| Descriptor request limiter | `rate_limit` supports `mode: descriptor` using metadata or trusted headers. | Replaces the request-count slice of Limitador for Praxis-owned routes. This is not token limiting. |
+| Bridge mode | Praxis can consume `x-maas-subscription` injected by Authorino, make a descriptor-limit decision, then strip the internal header. | Allows incremental adoption without removing Authorino first. |
+| HTTP ext-auth | Praxis can call `maas-api` with an opaque `sk-oai-*` key and require `valid:true`. | Starts the targeted Authorino replacement path for MaaS API-key validation. Not cluster-wired yet. |
+| Shared state | Deferred. | Required before multi-replica descriptor limits or token quotas are correct. |
+
+The important boundary: Phase 2 replaces **routing and local
+request-admission mechanics**, not the full MaaS policy system.
+Token quotas, subscription selection, distributed counters, and
+full Authorino/Limitador removal remain later work.
+
 ## Task Status
 
 | Task | Description | Status | Commit |
@@ -60,7 +93,7 @@ All commits on `feat/maas-phase2` branch, ordered by dependency:
 | 4 | Descriptor-based local request rate limiting | **Done** | `c9172fa` |
 | 5 | Descriptor limiter demo validation | **Done** | praxis-pocs `7e51c5f` |
 | 6 | Bridge-mode MaaS descriptor projection | **Done** | praxis-pocs `2b8bb64` |
-| 7 | HTTP ext-auth filter for MaaS API key validation | **Done** | `45550c1` |
+| 7 | HTTP ext-auth filter for MaaS API key validation | **Done - code/unit tests, not cluster-wired** | `45550c1` |
 | 8 | Shared Redis/Valkey rate-limit backend | **Deferred** | — |
 
 ## Issue Alignment
@@ -84,8 +117,8 @@ All commits on `feat/maas-phase2` branch, ordered by dependency:
 | Praxis can enforce request-admission limits by trusted descriptor | Yes — descriptor isolation, burst exhaustion, /metrics |
 | Praxis can consume Authorino-injected MaaS identity for rate limiting | Yes — bridge mode with `x-maas-subscription` |
 | Praxis strips descriptor headers before upstream | Yes — OpenAI doesn't see internal headers |
-| Praxis can validate MaaS API keys via HTTP callout | Yes (code) — not yet deployed as Authorino replacement |
-| Praxis fails closed on invalid/missing `valid` field | Yes (code + tests) |
+| Praxis can validate MaaS API keys via HTTP callout | Yes (code + unit tests) — not yet deployed as Authorino replacement |
+| Praxis fails closed on invalid/missing `valid` field | Yes (code + unit tests) |
 | Per-filter failure modes work across all execution phases | Yes (code + tests) |
 | `/metrics` exposes rate-limit and auth decisions | Yes — `praxis_rate_limit_decisions_total`, `praxis_auth_*_total` |
 
@@ -98,6 +131,101 @@ All commits on `feat/maas-phase2` branch, ordered by dependency:
 | Full Limitador replacement | Requires token counting + shared state + dashboard compatibility |
 | Full Authorino replacement | Task 7 ext-auth needs cluster validation, TLS/CA story, subscription selection |
 | Kuadrant wasm plugin elimination | Requires Phase 2 + 2b together on targeted routes |
+
+## Request Flows
+
+### Flow A: Descriptor Limiter Demo
+
+This is a standalone Praxis-owned route used to prove local
+descriptor request limiting.
+
+```text
+client
+  -> OpenShift Gateway /praxis-desc/v1/chat/completions/
+  -> Kuadrant/Authorino validates Kubernetes token for demo route
+  -> Praxis `praxis-descriptor`
+     -> request_id/access_log
+     -> model_to_header extracts body model into X-AI-Model
+     -> rate_limit mode=descriptor reads:
+        - X-MaaS-Subscription
+        - X-AI-Model
+     -> router chooses qwen or mistral echo backend
+  -> echo backend
+```
+
+Validated by `validate-descriptor.sh`:
+
+- first request for `free/qwen` is allowed
+- second request for `free/qwen` is rejected with `429`
+- `premium/qwen` gets a separate bucket
+- `free/mistral` gets a separate bucket
+- missing descriptor is rejected
+- `/metrics` exposes rate-limit decisions
+- Praxis logs show rate-limit decisions
+
+This proves local request-count limiting only. It does not prove
+token quotas or distributed counters.
+
+### Flow B: MaaS Bridge Mode
+
+This is the real MaaS `gpt-4o` ExternalModel path with Authorino
+still in front. Praxis consumes the identity header that Authorino
+already injects.
+
+```text
+client with MaaS API key
+  -> OpenShift Gateway /llm/gpt-4o/v1/chat/completions
+  -> Kuadrant wasm plugin
+     -> Authorino validates sk-oai-* key with maas-api
+     -> Authorino checks subscription/policy
+     -> Limitador still handles token quota policy
+     -> Authorino injects x-maas-subscription
+  -> Praxis `praxis-gateway`
+     -> rate_limit mode=descriptor reads x-maas-subscription
+     -> Praxis strips x-maas-subscription before upstream
+     -> header filter replaces Authorization with provider key
+     -> upstream TLS to OpenAI
+  -> OpenAI
+```
+
+Validated by `validate-bridge-mode.sh`:
+
+- MaaS API key request succeeds on `/llm/gpt-4o/...`
+- Praxis metrics show descriptor decision `allow` / `reason=ok`
+- OpenAI response succeeds after internal descriptor header is stripped
+
+This is the safest incremental replacement mode because Authorino
+continues to own auth and subscription checks while Praxis starts
+owning request-admission decisions.
+
+### Flow C: Future Targeted Authorino Replacement
+
+Task 7 adds the code required for Praxis to validate opaque MaaS
+API keys directly, but this flow is not deployed in the current
+cluster demo.
+
+```text
+client with MaaS API key
+  -> OpenShift Gateway on targeted Praxis-owned route
+  -> Praxis
+     -> http_ext_auth extracts Bearer token
+     -> POST {"key":"<token>"} to maas-api /internal/v1/api-keys/validate
+     -> require response valid:true
+     -> map subscription/user fields into filter_metadata and/or headers
+     -> strip Authorization before upstream
+     -> descriptor rate_limit consumes metadata/header
+     -> route to model backend/provider
+```
+
+Remaining work before this replaces Authorino on a MaaS route:
+
+- cluster deployment manifest that wires `http_ext_auth` into a
+  targeted route
+- TLS/service CA handling for the `maas-api` HTTPS endpoint
+- subscription-selection parity if the route needs Authorino's
+  `subscription-info` behavior, not just API-key validation
+- negative E2E tests for invalid/revoked keys
+- confirmation that credential stripping works on real upstream traffic
 
 ## Validation Scripts
 
