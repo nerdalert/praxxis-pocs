@@ -78,13 +78,19 @@ echo ""
 
 echo "--- Patching gpt-4o HTTPRoute to Praxis backend ---"
 if oc -n llm get httproute gpt-4o &>/dev/null; then
+  RULE_COUNT=$(oc get httproute gpt-4o -n llm -o jsonpath='{.spec.rules | length}')
   oc -n llm patch httproute gpt-4o --type='json' -p='[
     {"op":"replace","path":"/spec/rules/0/backendRefs/0/name","value":"praxis-gateway"},
-    {"op":"replace","path":"/spec/rules/0/backendRefs/0/port","value":8080},
-    {"op":"replace","path":"/spec/rules/1/backendRefs/0/name","value":"praxis-gateway"},
-    {"op":"replace","path":"/spec/rules/1/backendRefs/0/port","value":8080}
+    {"op":"replace","path":"/spec/rules/0/backendRefs/0/port","value":8080}
   ]'
-  echo "gpt-4o HTTPRoute patched to praxis-gateway:8080"
+  if [ "$RULE_COUNT" -gt 1 ] 2>/dev/null; then
+    oc -n llm patch httproute gpt-4o --type='json' -p='[
+      {"op":"remove","path":"/spec/rules/1"}
+    ]'
+    echo "gpt-4o HTTPRoute patched to praxis-gateway:8080 (removed extra rule)"
+  else
+    echo "gpt-4o HTTPRoute patched to praxis-gateway:8080"
+  fi
 else
   echo "WARN: gpt-4o HTTPRoute not found — deploy ExternalModel first (see docs/install.md §5)"
 fi

@@ -22,7 +22,7 @@ MaaS control plane, or all Kuadrant/Limitador token quota behavior.
 | Request auth | Implemented and validated in Praxis | Praxis can call `maas-api` directly to validate MaaS API keys. `maas-api` remains the source of truth. |
 | Request-count limiting | Implemented and validated | Praxis can enforce descriptor-based request limits keyed by subscription/user/model metadata. |
 | Token limits | Planned for Phase 4 | Praxis does not yet enforce MaaS token quotas or replace Limitador token accounting. |
-| Clean Kuadrant bypass | In progress / needs explicit validation | Shadow-route mode still passes through Kuadrant mechanically. Clean Gateway mode is the target proof for no Authorino/Limitador path. |
+| Clean Kuadrant bypass | **Validated** (Phase 3B) | Clean Gateway mode proves no Authorino/Limitador in the request path. Limitador counters do not increment; Authorino logs show no activity. |
 | Full gateway replacement | Not in scope yet | Envoy/OpenShift Gateway still receives external traffic; Praxis runs behind it as a backend today. |
 
 The simplest current description is:
@@ -41,7 +41,7 @@ full gateway replacement are still future phases.
 | Phase 1 completion report | [demos/maas-praxis/phase-1-completion.md](demos/maas-praxis/phase-1-completion.md) | [scripts/validate-all.sh](scripts/validate-all.sh) | Complete | Detailed validation summary for Phase 1. |
 | Phase 2: request-admission controls | [demos/maas-praxis-phase2/README.md](demos/maas-praxis-phase2/README.md) | [deploy-descriptor.sh](demos/maas-praxis-phase2/deploy-descriptor.sh), [validate-descriptor.sh](demos/maas-praxis-phase2/validate-descriptor.sh), [validate-bridge-mode.sh](demos/maas-praxis-phase2/validate-bridge-mode.sh) | Complete | Metadata bag, Prometheus metrics, failure modes, descriptor limiter, and HTTP ext-auth foundation. |
 | Phase 3: Praxis-owned auth and request limiting | [demos/maas-praxis-phase3/README.md](demos/maas-praxis-phase3/README.md) | [deploy.sh](demos/maas-praxis-phase3/deploy.sh), [validate.sh](demos/maas-praxis-phase3/validate.sh) | Shadow route validated | Praxis owns MaaS key validation and request limiting, but shared gateway path still uses pass-through Kuadrant policies. |
-| Phase 3 clean Gateway path | [demos/maas-praxis-phase3/README.md](demos/maas-praxis-phase3/README.md) | [deploy-clean-gateway.sh](demos/maas-praxis-phase3/deploy-clean-gateway.sh), [validate-clean-gateway.sh](demos/maas-praxis-phase3/validate-clean-gateway.sh) | Needs explicit validation | Target path to prove the route works without shadow policies or pass-through Authorino/Limitador. |
+| Phase 3 clean Gateway path | [demos/maas-praxis-phase3/README.md](demos/maas-praxis-phase3/README.md) | [deploy-clean-gateway.sh](demos/maas-praxis-phase3/deploy-clean-gateway.sh), [validate-clean-gateway.sh](demos/maas-praxis-phase3/validate-clean-gateway.sh) | **Validated** (8/8) | Proves Praxis works without any Kuadrant components. Authorino logs silent, Limitador counters unchanged. |
 | Phase 4: token limits and usage accounting | [demos/maas-praxis-phase4/README.md](demos/maas-praxis-phase4/README.md) | Not implemented yet | Planning | Replace token-quota slice of TRLP/Limitador for targeted Praxis-owned routes. |
 | Install/runbook | [docs/install.md](docs/install.md) | N/A | Reference | MaaS + Praxis install notes. |
 | StreamBuffer technical detail | [docs/streambuffer.md](docs/streambuffer.md) | N/A | Reference | Body forwarding issue and fix background. |
@@ -60,8 +60,8 @@ full gateway replacement are still future phases.
 | Per-filter failure mode | Not present | Done | Done | Done | Done |
 | Request-count descriptor limits | Not present | Done | Done | Done | Done |
 | Praxis-owned MaaS API-key validation | Not present | Code ready | Validated | Target validation | Done |
-| Authorino physically absent from path | No | No | No | Target | Target |
-| Limitador physically absent from path | No | No | No | Target | Target |
+| Authorino physically absent from path | No | No | No | **Validated** | Target |
+| Limitador physically absent from path | No | No | No | **Validated** | Target |
 | Token quota enforcement | No | No | No | No | Target |
 | Shared quota state | No | No | No | No | Target/follow-up |
 | Full Envoy gateway replacement | No | No | No | No | Later |
@@ -218,7 +218,7 @@ Praxis currently enforces request-count limits, not token quotas.
 | Phase 2 bridge mode | `validate-bridge-mode.sh` | Passing | Authorino-injected descriptor consumed and stripped by Praxis. |
 | Phase 2 ext-auth unit tests | Rust unit tests | Passing | Exercises config parsing, token extraction, and runtime behavior. |
 | Phase 3A shadow route | `validate.sh` | Passing | Praxis owns decisions; pass-through Kuadrant still mechanically present. |
-| Phase 3B clean Gateway | `validate-clean-gateway.sh` | Needs explicit run/result | This should be the next proof point if not already captured in the phase doc. |
+| Phase 3B clean Gateway | `validate-clean-gateway.sh` | **8/8 passing** | Praxis auth + rate limiting without Kuadrant. Limitador counters unchanged, Authorino logs silent. |
 | Phase 4 token limits | Not implemented | Not applicable | Planning only. |
 
 ## Known Gaps and Caveats
@@ -265,7 +265,7 @@ Suggested new or follow-up issues if they do not already exist:
 | Secret-backed provider credential source | Needed to remove static provider keys from ConfigMaps. |
 | Clean Gateway no-Kuadrant validation gate | Needed to prove physical bypass, not just decision ownership. |
 
-## Recommended Next Steps
+## Next Steps
 
 | Priority | Step | Why |
 |---:|---|---|
@@ -277,10 +277,79 @@ Suggested new or follow-up issues if they do not already exist:
 | 6 | Build or prototype a MaaSSubscription config adapter. | Bridges MaaS CRD policy into Praxis config. |
 | 7 | Add streaming/SSE token accounting. | Required for real chat-completion traffic parity. |
 
-## One-Sentence Status
+## Live Demo
 
-Praxis is a validated replacement for MaaS body-based routing and provider
-egress, has working foundations for Praxis-owned auth and request limiting,
-and needs Phase 3B clean-Gateway validation plus Phase 4 token accounting
-before it can replace the Authorino/Limitador enforcement path for targeted
-MaaS routes.
+Set your MaaS API key before running the examples:
+
+```bash
+MAAS_KEY="<insert maas key>"
+```
+
+### Path 1: MaaS route — Kuadrant + Praxis
+
+Client → Envoy gateway → Kuadrant wasm (AuthPolicy + TRLP pass-through)
+→ Authorino → Praxis → `maas-api` validation → OpenAI
+
+```bash
+curl -sk "https://maas.apps.brent2.octo-emerging.redhataicoe.com/llm/gpt-4o/v1/chat/completions" \
+  -H "Authorization: Bearer ${MAAS_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}'
+```
+
+### Path 2: Clean gateway — Praxis only, no Kuadrant
+
+Client → clean Envoy gateway (no AuthPolicy, no TRLP) → Praxis
+→ `maas-api` validation → OpenAI
+
+```bash
+curl -sk "http://praxis-clean.apps.brent2.octo-emerging.redhataicoe.com/praxis-maas/gpt-4o/v1/chat/completions" \
+  --resolve "praxis-clean.apps.brent2.octo-emerging.redhataicoe.com:80:3.13.196.66" \
+  -H "Authorization: Bearer ${MAAS_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Reply with ok."}],"max_tokens":5}'
+```
+
+The `--resolve` flag is required because the clean gateway has its
+own ELB. The wildcard `*.apps` DNS record points to the main
+gateway's ELB, not this one.
+
+### Path comparison
+
+| | Path 1: `/llm/gpt-4o` | Path 2: `/praxis-maas/gpt-4o` |
+|---|---|---|
+| **Gateway** | `maas-default-gateway` (shared) | `praxis-clean-gateway` (dedicated) |
+| **Protocol** | HTTPS (443) | HTTP (80) |
+| **Kuadrant WasmPlugin** | Active — enforces AuthPolicy + TRLP | Not present — no policies on clean gateway |
+| **Authorino** | Active — validates MaaS API key via passthrough | Not present — Praxis validates directly |
+| **Limitador** | Active — permissive TRLP (passthrough) | Not present — Praxis handles rate limiting |
+| **ext-proc / BBR** | Removed — Praxis replaces body-based routing | Removed |
+| **EnvoyFilter** | Removed — no ext-proc EnvoyFilter | Removed |
+| **Praxis `http_ext_auth`** | Not active (Authorino handles auth) | Active — calls `maas-api` to validate MaaS keys |
+| **Praxis descriptor rate limiter** | Not active (Limitador handles rate limits) | Active — 10 req/s per subscription |
+| **Praxis credential injection** | Active — injects OpenAI API key, rewrites Host | Active — same |
+| **Praxis path rewrite** | Active — strips `/llm/gpt-4o` | Active — strips `/praxis-maas/gpt-4o` |
+| **`maas-api`** | Source of truth (called by Authorino) | Source of truth (called by Praxis) |
+
+### What Path 2 proves
+
+Path 2 demonstrates that Praxis can operate as a complete auth +
+rate-limit + routing + egress data plane without any Kuadrant
+components in the request path. Authorino logs show no activity
+for clean gateway requests. Limitador counters do not increment.
+The only shared dependency is `maas-api`, which remains the key
+validation backend for both paths.
+
+### Current limitations
+
+| Limitation | Detail | Impact |
+|---|---|---|
+| MaaS controller reconciliation | The MaaS controller periodically reverts the `gpt-4o` HTTPRoute `backendRef` back to the ExternalName service. Path 1 requires re-patching after reconciliation. | Path 1 may intermittently 404 until `deploy.sh` is re-run. Path 2 is not affected. |
+| Dual-rule routing flake | If the MaaS controller re-adds a second HTTPRoute rule after patching, Envoy may intermittently route to the wrong backend. | `deploy.sh` now removes the extra rule. Re-run after controller reconciliation. |
+| Rate limits are static | Praxis rate limits are hardcoded in the ConfigMap (`rate: 10`, `burst: 20`). MaaS defines limits via `TokenRateLimitPolicy` CRD. | Changing limits requires editing the ConfigMap and restarting the pod. |
+| Request counting only | Praxis counts requests, not tokens. MaaS TRLP supports token quotas. | Cannot replace Limitador token quota enforcement yet. Requires token counting (#20). |
+| Local rate-limit state | Each Praxis pod has its own token bucket. Two replicas each allow `rate` req/s independently. | Multi-replica deployments need a shared backend (Redis/Valkey). |
+| `tls_skip_verify: true` | Phase 3 config skips TLS verification for the `maas-api` callout. | Dev/POC only. Production must use real certs or mount the OpenShift serving CA. |
+| No dynamic config | Praxis does not watch CRDs or reload config at runtime. | Pod restart required for any config change. |
+| Clean gateway uses HTTP | `praxis-clean-gateway` listens on port 80, not 443. | Traffic between client and gateway is unencrypted. TLS listener requires cert provisioning. |
+
